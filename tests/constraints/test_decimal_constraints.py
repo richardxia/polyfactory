@@ -3,7 +3,7 @@ from random import Random
 from typing import Optional, cast
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis.strategies import decimals, integers
 
 from pydantic import BaseModel, condecimal
@@ -239,19 +239,23 @@ def test_handle_constrained_decimal_handles_multiple_of_with_le(val1: Decimal, v
     decimals(
         allow_nan=False,
         allow_infinity=False,
-        min_value=-1000000000,
-        max_value=1000000000,
+        min_value=-100000000,
+        max_value=100000000,
     ),
     decimals(
         allow_nan=False,
         allow_infinity=False,
-        min_value=-1000000000,
-        max_value=1000000000,
+        min_value=-100000000,
+        max_value=100000000,
     ),
 )
 def test_handle_constrained_decimal_handles_multiple_of_with_ge(val1: Decimal, val2: Decimal) -> None:
     min_value, multiple_of = sorted([val1, val2])
     if multiple_of != Decimal("0"):
+        # When multiple_of is too many orders of magnitude smaller than min_value, then floating-point precision issues
+        # prevent us from constructing a number that can pass passes_pydantic_multiple_validator(). This scenario is
+        # very unlikely to occur in practice, so we tell Hypothesis to not generate these cases.
+        assume(abs(min_value / multiple_of) < Decimal("1e8"))
         result = handle_constrained_decimal(
             random=Random(),
             multiple_of=multiple_of,
@@ -267,23 +271,37 @@ def test_handle_constrained_decimal_handles_multiple_of_with_ge(val1: Decimal, v
             )
 
 
+# Note: The magnitudes of the min and max values have been specifically chosen to avoid issues with floating-point
+# rounding errors. Despite these tests using Decimal numbers, the function under test will convert them to floats when
+# calling `passes_pydantic_multiple_validator()`. Because `passes_pydantic_multiple_validator()` uses the modulus
+# operator (%) with a fixed modulo of 1.0, we actually have to care about the absolute rounding error, not the relative
+# error. IEEE 754 double-precision floating-point numbers are guaranteed to have at least 15 decimal digits of
+# significand and up to 17 decimal digits of significant. `passes_pydantic_multiple_validator()` requires that the
+# remainder modulo 1.0 be within 1e-8 of 0.0 or 1.0. Therefore, we can support a maximum value of approximately 10**(15
+# - 8) = 10**7. We have some probabilistic buffer, so can set a maximum value of 10**8 and expect the tests to pass with
+# reasonable confidence.
 @given(
     decimals(
         allow_nan=False,
         allow_infinity=False,
-        min_value=-1000000000,
-        max_value=1000000000,
+        min_value=-100000000,
+        max_value=100000000,
     ),
     decimals(
         allow_nan=False,
         allow_infinity=False,
-        min_value=-1000000000,
-        max_value=1000000000,
+        min_value=-100000000,
+        max_value=100000000,
     ),
 )
 def test_handle_constrained_decimal_handles_multiple_of_with_gt(val1: Decimal, val2: Decimal) -> None:
     min_value, multiple_of = sorted([val1, val2])
     if multiple_of != Decimal("0"):
+        # Despite the note above about choosing a max_value to avoid _absolute_ rounding errors, we also have to worry
+        # about _relative_ rounding errors between min_value and multiple_of. Once again,
+        # `passes_pydantic_multiple_validator()` requires that the remainder be no greater than 1e-8, so we tell
+        # Hypothesis not to generate cases where the min_value and multiple_of have a ratio greater than that.
+        assume(abs(min_value / multiple_of) < Decimal("1e8"))
         result = handle_constrained_decimal(
             random=Random(),
             multiple_of=multiple_of,

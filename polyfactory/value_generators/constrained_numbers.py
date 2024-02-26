@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import decimal
 from decimal import Decimal
+from math import ceil, floor, isinf
 from sys import float_info
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
@@ -227,16 +229,62 @@ def generate_constrained_number(
 
     :returns: A value of type T.
     """
-    if minimum is None or maximum is None:
-        return multiple_of if multiple_of is not None else method(random=random)
     if multiple_of is None:
         return method(random=random, minimum=minimum, maximum=maximum)
-    if multiple_of >= minimum:
+
+    def passes_all_constraints(value: T) -> bool:
+        return (
+            (minimum is None or value >= minimum)
+            and (maximum is None or value <= maximum)
+            and (multiple_of is None or passes_pydantic_multiple_validator(value, multiple_of))
+        )
+
+    # If the arguments are Decimals, they might have precision that is greater than the current decimal context. If
+    # so, recreate them under the current context to ensure they have the appropriate precision. This is important
+    # because otherwise, x * 1 == x may not always hold, which can cause the algorithm below to fail in unintuitive
+    # ways.
+    if isinstance(minimum, Decimal):
+        minimum = decimal.getcontext().create_decimal(minimum)
+    if isinstance(maximum, Decimal):
+        maximum = decimal.getcontext().create_decimal(maximum)
+    if isinstance(multiple_of, Decimal):
+        multiple_of = decimal.getcontext().create_decimal(multiple_of)
+
+    max_attempts = 10
+    for _ in range(max_attempts):
+        # We attempt to generate a random number and find the nearest valid multiple, but a naive approach of rounding
+        # to the nearest multiple may push the number out of range. To handle edge cases, we find both the nearest
+        # multiple in both the negative and positive directions (floor and ceil), and we pick one that fits within
+        # range. We should be guaranteed to find a number other than in the case where the range (minimum, maximum) is
+        # narrow and does not contain any multiple of multiple_of.
+        random_value = method(random=random, minimum=minimum, maximum=maximum)
+        quotient = random_value / multiple_of
+        if isinf(quotient):
+            continue
+        lower = floor(quotient) * multiple_of
+        upper = ceil(quotient) * multiple_of
+
+        # If both the lower and upper candidates are out of bounds, then there are no valid multiples that fit within
+        # the specified range.
+        if minimum is not None and maximum is not None and lower < minimum and upper > maximum:
+            msg = f"no multiple of {multiple_of} exists between {minimum} and {maximum}"
+            raise ParameterException(msg)
+
+        for candidate in [lower, upper]:
+            if not passes_all_constraints(candidate):
+                continue
+            return candidate
+
+    # Try last-ditch attempt at using the multiple_of, 0, or -multiple_of as the value
+    if passes_all_constraints(multiple_of):
         return multiple_of
-    result = minimum
-    while not passes_pydantic_multiple_validator(result, multiple_of):
-        result = round(method(random=random, minimum=minimum, maximum=maximum) / multiple_of) * multiple_of
-    return result
+    if passes_all_constraints(-multiple_of):
+        return -multiple_of
+    if passes_all_constraints(multiple_of * 0):
+        return multiple_of * 0
+
+    msg = f"could not find solution in {max_attempts} attempts"
+    raise ValueError(msg)
 
 
 def handle_constrained_int(
